@@ -1,7 +1,7 @@
 import chainer
 import chainer.functions as F
 import chainer.links as L
-from chainer import optimizers
+from chainer import optimizers, serializers
 
 import numpy as np
 
@@ -11,7 +11,7 @@ from matplotlib import pyplot as plt
 
 class RNN(chainer.Chain):
     def __init__(self):
-        n_units = 5
+        n_units = 64
         super().__init__(
             l1 = L.Linear(2, n_units),
             l2=L.LSTM(n_units, n_units),
@@ -32,18 +32,11 @@ class Loss(chainer.Chain):
         super().__init__(predictor=predictor)
 
     def __call__(self, x, t):
-        x.data = x.data.reshape((-1, len(x.data))).astype(np.float32)
-        t.data = t.data.reshape((-1, len(t.data))).astype(np.float32)
-
         y = self.predictor(x)
-        #for i,j in zip(y,t):
-        #    print(i.data,j.data)
         loss = F.mean_squared_error(y, t)
-        #print(loss.data)
-        #report({'loss':loss}, self)
         return loss
 
-dev_id = -1
+dev_id = 0
 
 if dev_id >= 0:
     chainer.cuda.get_device(dev_id).use()
@@ -53,25 +46,37 @@ model = Loss(rnn)
 optimizer = optimizers.Adam()
 optimizer.setup(model)
 
+continue_training = True
+if continue_training:
+    serializers.load_hdf5("curve.model", rnn)
+    serializers.load_hdf5("curve.state", optimizer)
+
 if dev_id >= 0:
     model.to_gpu()
 
-n = 25000
-trk_len = 10
+n = 500
+batchsize = 32
+trk_len = 16
 
 for i in range(n):
 
     rnn.reset_state()
 
-    track = generate_trajectory(n=trk_len)
-    
-    train = track[:-1]
-    true = track[1:]
-    #print(train.shape, true.shape)
+    # get a batch of training curves
+    batch = generate_trajectory(n=trk_len)
+
+    for b in range(batchsize-1):
+        batch = np.concatenate((batch, generate_trajectory(n=trk_len)))
+
+    train = batch[:,:-1]
+    true = batch[:,1:]
 
     loss = 0.0
 
-    for x, t in zip(train, true):
+    for ii in range(trk_len-1):
+        x = train[:,ii,:]
+        t = true[:,ii,:]
+
         if dev_id >= 0:
             x = chainer.cuda.to_gpu(x)
             t = chainer.cuda.to_gpu(t)
@@ -83,37 +88,57 @@ for i in range(n):
     loss.unchain_backward()
     optimizer.update()
     
-
     if int(i) % 100 == 0:
         print(i,n,loss.data)
 
+# save our model
+serializers.save_hdf5("curve.model", rnn)
+serializers.save_hdf5("curve.state", optimizer)
 
 # test the model
-n_test = 3
+n_test = 1
 
-plt.figure()
+fig = plt.figure()
+ax = fig.add_subplot(111)
+
+occluded = [8,9,10]
 
 for test in range(n_test):
     track = generate_trajectory(n=trk_len)
+    rnn.reset_state()
 
     x = []
     y = []
 
-    for i in track[:-1]:
+    for c, i in enumerate(track[0,]):
         i = i.reshape(-1, len(i))
+
+        #if c > trk_len / 2:
+        #    print("predicting {}".format(c))
+        #    i = np.array([[x[-1], y[-1]]])
+        
+        # remove some measurements
+        if c in occluded:
+            print("{} is occluded".format(c))
+            i = np.array([[x[-1], y[-1]]])
+
+
         if dev_id >= 0:
             i = chainer.cuda.to_gpu(i)
-        yy = rnn(chainer.Variable(i))
+        
+        yy = rnn(chainer.Variable(i)).data
 
         if dev_id >= 0:
             yy = chainer.cuda.to_cpu(yy)
+            i = chainer.cuda.to_cpu(i)
 
-        x.append(yy[0,0].data)
-        y.append(yy[0,1].data)
+        x.append(yy[0,0])
+        y.append(yy[0,1])
 
-    plt.plot(track[:,0], track[:,1], ls="dashed")
-    plt.plot(x, y)
+    # remove occluded elements from plot
+    track = np.delete(track, occluded, 1)
 
-    rnn.reset_state()
+    ax.scatter(track[0,:,0], track[0,:,1], c="black", marker="o", s=50)
+    ax.plot(x, y, lw=3)
 
 plt.show()
